@@ -1,121 +1,170 @@
 import streamlit as st
+from transformers import pipeline
 import openai
-import requests
-from io import BytesIO
-from deep_translator import GoogleTranslator
-from gtts import gTTS
-import base64
-import re
+import PyPDF2
+import io
+from docx import Document
+import pandas as pd
+from datetime import datetime
+import os
 
-# --- Page Config ---
-st.set_page_config(page_title=" Medicine Assistant", layout="centered")
-st.title(" Medicine Strip Assistant")
-st.caption("Image → Table → Translation → Audio for Elderly Care")
+# Set page configuration
+st.set_page_config(page_title="💬 Advanced QA System", layout="wide")
 
-# --- Inputs ---
-openai_api = st.text_input("🔐 Enter your OpenAI API Key", type="password")
-input_type = st.radio("📷 How would you like to provide the image?", ["Upload Image", "Paste Image URL"])
-user_lang = st.text_input("🌐 Output Language (e.g., en, hi, kn)", value="en")
+# Sidebar for settings
+with st.sidebar:
+    st.header("⚙️ Settings")
+    
+    # Model selection
+    model_option = st.selectbox(
+        "Select QA Model",
+        ["Hugging Face", "GPT-3.5", "Both"]
+    )
+    
+    # Language selection
+    language = st.selectbox(
+        "Select Language",
+        ["English", "Spanish", "French", "German", "Chinese"]
+    )
+    
+    # Question type selection
+    question_type = st.selectbox(
+        "Question Type",
+        ["Factual", "Analytical", "Comparative", "Hypothetical"]
+    )
+    
+    # OpenAI API key input
+    api_key = st.text_input("OpenAI API Key (for GPT-3.5)", type="password")
+    
+    # Export options
+    st.header("📤 Export Options")
+    export_format = st.selectbox("Export Format", ["PDF", "CSV", "TXT"])
+    if st.button("Export Results"):
+        st.info("Export functionality will be implemented here")
 
-image_bytes = None
+# Main content
+st.title("💬 Advanced Question Answering System")
 
-# --- Image Loader ---
-def load_image():
-    if input_type == "Upload Image":
-        uploaded = st.file_uploader("Upload a medicine strip image", type=["jpg", "jpeg", "png"])
-        return uploaded.read() if uploaded else None
-    else:
-        url = st.text_input("Paste image URL here:")
-        if url:
-            try:
-                response = requests.get(url)
-                if response.status_code == 200:
-                    st.image(BytesIO(response.content), caption="Image from URL")
-                    return response.content
-            except:
-                st.error("Failed to fetch the image from the provided URL.")
-    return None
+# File upload option
+uploaded_file = st.file_uploader("Upload a document (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"])
 
-# --- Prepare Base64 Image for GPT-4 Vision ---
-def encode_image(image_bytes):
-    encoded = base64.b64encode(image_bytes).decode("utf-8")
-    return f"data:image/jpeg;base64,{encoded}"
+# Context input
+if uploaded_file is not None:
+    file_details = {"filename": uploaded_file.name, "filetype": uploaded_file.type, "filesize": uploaded_file.size}
+    st.write(file_details)
+    
+    # Read the file content
+    if uploaded_file.type == "application/pdf":
+        pdf_reader = PyPDF2.PdfReader(uploaded_file)
+        context = ""
+        for page in pdf_reader.pages:
+            context += page.extract_text()
+    elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        doc = Document(uploaded_file)
+        context = "\n".join([paragraph.text for paragraph in doc.paragraphs])
+    else:  # txt file
+        context = uploaded_file.getvalue().decode("utf-8")
+    
+    st.text_area("Extracted Context:", context, height=150)
+else:
+    context = st.text_area("Paste context passage (e.g., syllabus):", height=150)
 
-# --- GPT-4 Turbo Vision Call ---
-def analyze_medicine_strip(image_data_url):
-    openai.api_key = openai_api
-    try:
-        response = openai.chat.completions.create(
-            model="gpt-4-turbo",
-            messages=[
-                {"role": "user", "content": [
-                    {"type": "text", "text": "Analyze this medicine strip image. Step 1: Extract name, expiry, usage, dosage, food instructions, warnings in a markdown table. Step 2: Write a short, polite bullet-point summary for an elderly person, like a nurse would say. Do NOT include the table in the explanation."},
-                    {"type": "image_url", "image_url": {"url": image_data_url}}
-                ]}
-            ],
-            max_tokens=800
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        st.error(f"❌ GPT-4 Vision error: {e}")
-        return ""
+# Question input
+question = st.text_input("Ask a question:")
 
-# --- Clean Text for Audio ---
-def clean_audio_text(text):
-    text = re.sub(r"(Item\s+Information|Attribute\s+Value|Table\s*:\s*)", "", text, flags=re.IGNORECASE)
-    text = re.sub(r'[-•*‣●▪◦]+', '', text)
-    text = re.sub(r'[^\w\s.,]', '', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return f"Hi there! {text}"
+# Load models
+@st.cache_resource
+def load_qa_model():
+    return pipeline("question-answering", model="deepset/roberta-base-squad2")
 
-# --- Text-to-Speech ---
-def generate_audio(text, lang):
-    try:
-        cleaned_text = clean_audio_text(text)
-        tts = gTTS(text=cleaned_text, lang=lang)
-        audio_fp = BytesIO()
-        tts.write_to_fp(audio_fp)
-        audio_fp.seek(0)
-        return audio_fp
-    except Exception as e:
-        st.error(f"❌ Error generating audio: {e}")
-        return None
+qa_model = load_qa_model()
 
-# --- Main Pipeline ---
-image_bytes = load_image()
-if image_bytes and openai_api:
-    st.markdown("---")
-    st.image(BytesIO(image_bytes), caption="Selected Image", use_column_width=True)
+# Store session history
+if 'qa_history' not in st.session_state:
+    st.session_state.qa_history = []
 
-    if st.button("🤖 Analyze Medicine Strip"):
-        with st.spinner("Analyzing image using GPT-4 Turbo..."):
-            img_data_url = encode_image(image_bytes)
-            result = analyze_medicine_strip(img_data_url)
+# Process question
+if st.button("🔍 Answer the Question"):
+    if context and question:
+        # Create columns for side-by-side comparison
+        col1, col2 = st.columns(2)
+        
+        # Hugging Face model
+        if model_option in ["Hugging Face", "Both"]:
+            with col1:
+                st.subheader("🤖 Hugging Face Answer")
+                try:
+                    result = qa_model(question=question, context=context)
+                    answer = result['answer']
+                    confidence = result['score']
+                    
+                    # Display answer with confidence score
+                    st.success(f"Answer: {answer}")
+                    st.info(f"Confidence Score: {confidence:.2f}")
+                    
+                    # Highlight the answer in the context
+                    st.subheader("Answer Highlighting")
+                    highlighted_context = context.replace(answer, f"**{answer}**")
+                    st.markdown(highlighted_context)
+                    
+                    # Store in history
+                    st.session_state.qa_history.append({
+                        "timestamp": datetime.now(),
+                        "question": question,
+                        "answer": answer,
+                        "confidence": confidence,
+                        "model": "Hugging Face",
+                        "question_type": question_type
+                    })
+                except Exception as e:
+                    st.error(f"HF Error: {e}")
+        
+        # GPT-3.5 model
+        if model_option in ["GPT-3.5", "Both"] and api_key:
+            with col2:
+                st.subheader("🤖 GPT-3.5 Answer")
+                try:
+                    openai.api_key = api_key
+                    
+                    # Customize prompt based on question type
+                    prompt = f"""
+                    Context: {context}
+                    
+                    Question Type: {question_type}
+                    Language: {language}
+                    
+                    Question: {question}
+                    
+                    Please provide a detailed answer with explanation of your reasoning.
+                    """
+                    
+                    response = openai.chat.completions.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=500
+                    )
+                    answer = response.choices[0].message.content.strip()
+                    
+                    # Display answer
+                    st.success(f"Answer: {answer}")
+                    
+                    # Store in history
+                    st.session_state.qa_history.append({
+                        "timestamp": datetime.now(),
+                        "question": question,
+                        "answer": answer,
+                        "confidence": "N/A",
+                        "model": "GPT-3.5",
+                        "question_type": question_type
+                    })
+                except Exception as e:
+                    st.error(f"OpenAI Error: {e}")
+        elif model_option in ["GPT-3.5", "Both"] and not api_key:
+            with col2:
+                st.warning("Please enter your OpenAI API key to use GPT-3.5")
 
-            if not result:
-                st.stop()
-
-            if "\n\n" in result:
-                table_md, summary = result.split("\n\n", 1)
-            else:
-                table_md, summary = result, ""
-
-            # Translation
-            try:
-                translated_summary = GoogleTranslator(source="auto", target=user_lang).translate(summary)
-            except Exception as e:
-                st.error(f"❌ Translation error: {e}")
-                translated_summary = summary
-
-            # Display Results
-            st.markdown("### 📋 Extracted Medicine Info")
-            st.markdown(table_md, unsafe_allow_html=True)
-
-            st.markdown(f"### 🧑‍⚕️ Advice for Elderly ({user_lang})")
-            st.success(translated_summary)
-
-            # Audio
-            st.markdown("### 🔊 Audio Output")
-            audio_output = generate_audio(translated_summary, user_lang)
-            if audio_output:
-                st.audio(audio_output, format="audio/mp3")
+# Display history
+if st.session_state.qa_history:
+    st.header("📜 Question & Answer History")
+    history_df = pd.DataFrame(st.session_state.qa_history)
+    st.dataframe(history_df)
