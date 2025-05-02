@@ -18,7 +18,7 @@ That is HuggingFace model and Gemini model.</p>
   ```
 - install required packages
   ```bash
-  pip install equirements.txt
+  pip install requirements.txt
   ```
 - Now you run this project...
 ```bash
