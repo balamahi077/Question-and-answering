@@ -1,0 +1,7 @@
+openai
+gtts
+documents
+pipeline
+transformers
+pypdf
+datetime
